@@ -365,10 +365,21 @@
     updateOutput();
   }
 
+  // 주민번호 등 초민감 열은 자동 추천에서 제외 (실수로 CSV에 넣지 않도록)
+  var SENSITIVE = ["주민", "주민등록"];
+  function isSensitive(cell) {
+    for (var i = 0; i < SENSITIVE.length; i++) {
+      if (cell.indexOf(SENSITIVE[i]) !== -1) return true;
+    }
+    return false;
+  }
+  // 키워드를 우선순위 순으로 훑는다: 앞 키워드(예: 관리번호)를 가진 열이
+  // 뒤 키워드(예: No)를 가진 열보다 먼저 선택된다.
   function guessColumn(header, keywords) {
-    for (var c = 0; c < header.length; c++) {
-      var cell = String(header[c] || "");
-      for (var k = 0; k < keywords.length; k++) {
+    for (var k = 0; k < keywords.length; k++) {
+      for (var c = 0; c < header.length; c++) {
+        var cell = String(header[c] || "");
+        if (isSensitive(cell)) continue;
         if (cell.indexOf(keywords[k]) !== -1) return String(c);
       }
     }
