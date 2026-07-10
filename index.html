@@ -209,7 +209,7 @@
 
     <div class="grid3">
       <label class="field">
-        <span class="lbl">관리번호 열</span>
+        <span class="lbl">등록번호 열</span>
         <select id="colId"></select>
       </label>
       <label class="field">
@@ -247,7 +247,7 @@
       <ol>
         <li>PC 브라우저에서 <b>google.com/maps/d</b> → 새 지도 만들기</li>
         <li>왼쪽 레이어 박스의 <b>[가져오기]</b> → 방금 받은 CSV 업로드</li>
-        <li>위치 열 = <b>주소</b>, 마커 제목 열 = <b>관리번호</b>(또는 이름) 선택</li>
+        <li>위치 열 = <b>주소</b>, 마커 제목 열 = <b>등록번호</b>(또는 이름) 선택</li>
         <li>폰에서 보기: 구글맵 앱 → 저장됨 → 지도</li>
       </ol>
     </details>
@@ -280,11 +280,12 @@
   var downloadBtn = $("download"), countLabel = $("countLabel");
   var pwPanel = $("pwPanel"), pwInput = $("pwInput"), pwGo = $("pwGo"), pwMsg = $("pwMsg");
 
-  // ---- 자동 추천 키워드 ----
+  // ---- 자동 추천 키워드 (앞 키워드가 우선) ----
   var GUESS = {
     addr: ["주소"],
     name: ["세대주", "성명", "이름", "성함", "대상자"],
-    id:   ["관리번호", "가구번호", "등록번호", "번호", "No"]
+    // 식별용 번호 열: 실사용 데이터엔 '관리번호' 열이 없고 등록번호가 핵심이라 등록번호를 먼저 고른다
+    id:   ["등록번호", "관리번호", "가구번호", "번호", "No"]
   };
 
   // ---- 1단계: 파일 받기 ----
@@ -582,7 +583,7 @@
   }
 
   function headerLabels(surnameOnly) {
-    return ["관리번호", surnameOnly ? "성씨" : "이름", "주소"];
+    return ["등록번호", surnameOnly ? "성씨" : "이름", "주소"];
   }
 
   function updateOutput() {
