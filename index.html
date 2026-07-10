@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>방문 지도용 CSV 변환기 (xlsx → CSV)</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🗺️</text></svg>">
 <!--
   완전 클라이언트사이드 도구. 모든 처리는 브라우저 안에서만 일어납니다.
   엑셀 명단(주민번호·건강정보 등 민감정보 포함)을 절대 외부로 보내지 않습니다.
@@ -131,6 +132,23 @@
   .msg.danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
   .msg[hidden] { display: none; }
 
+  .pwbox {
+    margin-top: 14px; padding: 16px; border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--brand) 40%, transparent);
+    background: color-mix(in srgb, var(--brand) 8%, transparent);
+  }
+  .pwbox[hidden] { display: none; }
+  .pwhead { font-weight: 700; }
+  .pwsub { color: var(--muted); font-size: .86rem; margin: 4px 0 12px; }
+  .pwrow { display: flex; gap: 8px; }
+  .pwrow input {
+    flex: 1; min-width: 0; padding: 10px 12px; font: inherit;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink);
+  }
+  .pwrow .btn { white-space: nowrap; }
+  .pwmsg { font-size: .86rem; margin-top: 10px; color: var(--danger); }
+  .pwmsg[hidden] { display: none; }
+
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
 
   details.guide { margin-top: 18px; }
@@ -161,6 +179,16 @@
     </button>
     <input type="file" id="file" accept=".xlsx,.xls" hidden>
     <div class="msg danger" id="fileErr" hidden></div>
+
+    <div class="pwbox" id="pwPanel" hidden>
+      <div class="pwhead">🔒 비밀번호가 걸린 엑셀이에요</div>
+      <div class="pwsub">파일 비밀번호를 입력하면 <b>이 브라우저 안에서 바로</b> 풀어드립니다. 비밀번호도 파일도 서버로 나가지 않습니다.</div>
+      <div class="pwrow">
+        <input type="password" id="pwInput" placeholder="파일 비밀번호" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="btn" id="pwGo">열기</button>
+      </div>
+      <div class="pwmsg" id="pwMsg" hidden></div>
+    </div>
   </section>
 
   <!-- 2단계 -->
@@ -235,6 +263,9 @@
   var aoa = [];            // 시트 전체 (배열의 배열)
   var headerIdx = 0;       // 선택된 헤더 행 인덱스
   var currentFileBase = "mymap_주소버전";
+  var currentDisplayName = "";   // 화면/기술정보용 파일명
+  var currentFileSize = 0;
+  var pendingEncBytes = null;    // 비밀번호 대기 중인 암호화 바이트
 
   // ---- DOM ----
   var $ = function (id) { return document.getElementById(id); };
@@ -246,6 +277,7 @@
   var surnameChk = $("surname");
   var previewArea = $("previewArea"), outMsg = $("outMsg");
   var downloadBtn = $("download"), countLabel = $("countLabel");
+  var pwPanel = $("pwPanel"), pwInput = $("pwInput"), pwGo = $("pwGo"), pwMsg = $("pwMsg");
 
   // ---- 자동 추천 키워드 ----
   var GUESS = {
@@ -348,42 +380,96 @@
 
   function handleFile(file) {
     showFileErr("");
+    hidePw();
+    pendingEncBytes = null;
     var name = (file.name || "").toLowerCase();
     if (!/\.(xlsx|xls)$/.test(name)) {
       showFileErr("xlsx 또는 xls 파일을 올려주세요.", (file.name || "(이름없음)") + " · 확장자가 .xlsx/.xls 가 아님");
       return;
     }
+    currentDisplayName = file.name || "?";
+    currentFileSize = file.size || 0;
     currentFileBase = (file.name || "출력").replace(/\.(xlsx|xls)$/i, "") + "_마이맵";
     var reader = new FileReader();
-    reader.onerror = function () { showFileErr("파일을 읽지 못했어요. 다시 시도해 주세요.", (file.name || "") + " · FileReader 오류"); };
-    reader.onload = function (e) {
-      var bytes = new Uint8Array(e.target.result);
-      var kind = sniffKind(bytes);
-      var info = (file.name || "?") + " · " + fmtSize(file.size) + " · 형식감지=" + kind;
-
-      if (kind === "empty") { showFileErr("파일이 비어 있어요 (0바이트). 원본을 다시 내려받아 올려주세요.", info); return; }
-      if (kind === "mhtml") { showFileErr(MSG_FAKE, info); return; }   // MHTML은 표 파싱 불가 → 재저장 안내
-
-      try {
-        var wb = parseWorkbook(bytes, kind);
-        var sheet = wb.Sheets[wb.SheetNames[0]];
-        if (!sheet) { showFileErr("엑셀 안에 시트(표)가 없어요. 다른 파일인지 확인해 주세요.", info); return; }
-        aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
-        if (!hasAnyContent(aoa)) {
-          showFileErr(
-            (kind === "html" || kind === "xml" || kind === "xmlss") ? MSG_FAKE
-              : "파일에서 표를 찾지 못했어요. 내용이 있는 엑셀인지 확인해 주세요.",
-            info);
-          return;
-        }
-        onSheetLoaded(file.name);
-      } catch (err) {
-        var detail = info + ' · 오류="' + ((err && err.message) ? err.message : String(err)) + '"';
-        showFileErr(diagMessage(kind, err), detail);
-      }
-    };
+    reader.onerror = function () { showFileErr("파일을 읽지 못했어요. 다시 시도해 주세요.", currentDisplayName + " · FileReader 오류"); };
+    reader.onload = function (e) { ingest(new Uint8Array(e.target.result)); };
     reader.readAsArrayBuffer(file);
   }
+
+  // 바이트를 받아 파싱까지 — 복호화 후에도 이 함수로 다시 들어온다
+  function ingest(bytes) {
+    var kind = sniffKind(bytes);
+    var info = currentDisplayName + " · " + fmtSize(currentFileSize) + " · 형식감지=" + kind;
+
+    if (kind === "empty") { showFileErr("파일이 비어 있어요 (0바이트). 원본을 다시 내려받아 올려주세요.", info); return; }
+    if (kind === "mhtml") { showFileErr(MSG_FAKE, info); return; }   // MHTML은 표 파싱 불가 → 재저장 안내
+
+    try {
+      var wb = parseWorkbook(bytes, kind);
+      var sheet = wb.Sheets[wb.SheetNames[0]];
+      if (!sheet) { showFileErr("엑셀 안에 시트(표)가 없어요. 다른 파일인지 확인해 주세요.", info); return; }
+      aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
+      if (!hasAnyContent(aoa)) {
+        showFileErr(
+          (kind === "html" || kind === "xml" || kind === "xmlss") ? MSG_FAKE
+            : "파일에서 표를 찾지 못했어요. 내용이 있는 엑셀인지 확인해 주세요.",
+          info);
+        return;
+      }
+      onSheetLoaded(currentDisplayName);
+    } catch (err) {
+      var m = (err && err.message) ? err.message : String(err);
+      if (/password|encrypt|decrypt/i.test(m)) { promptPassword(bytes); return; }   // 암호화 → 비밀번호 받기
+      showFileErr(diagMessage(kind, err), info + ' · 오류="' + m + '"');
+    }
+  }
+
+  // ---- 비밀번호 흐름 (브라우저 안에서만 복호화) ----
+  var _cryptoPromise = null;
+  function loadCrypto() {
+    if (window.OfficeCrypto) return Promise.resolve(window.OfficeCrypto);
+    if (_cryptoPromise) return _cryptoPromise;
+    _cryptoPromise = new Promise(function (res, rej) {
+      var s = document.createElement("script");
+      s.src = "vendor/officecrypto.min.js";
+      s.onload = function () { window.OfficeCrypto ? res(window.OfficeCrypto) : rej(new Error("복호화 모듈이 비어 있어요")); };
+      s.onerror = function () { _cryptoPromise = null; rej(new Error("복호화 모듈 로드 실패")); };
+      document.head.appendChild(s);
+    });
+    return _cryptoPromise;
+  }
+  function hidePw() { pwPanel.hidden = true; setPwMsg(""); if (pwInput) pwInput.value = ""; }
+  function setPwMsg(t) { pwMsg.textContent = t || ""; pwMsg.hidden = !t; }
+  function promptPassword(bytes) {
+    pendingEncBytes = bytes;
+    showFileErr("");
+    pwPanel.hidden = false;
+    setPwMsg("");
+    pwInput.focus();
+  }
+  function tryUnlock() {
+    if (!pendingEncBytes) return;
+    var pw = pwInput.value || "";
+    if (!pw) { setPwMsg("비밀번호를 입력해 주세요."); return; }
+    pwGo.disabled = true;
+    setPwMsg("여는 중…");
+    loadCrypto()
+      .then(function (OC) { return OC.decrypt(pendingEncBytes, { password: pw }); })
+      .then(function (dec) {
+        pwGo.disabled = false;
+        hidePw();
+        pendingEncBytes = null;
+        ingest(new Uint8Array(dec));   // 풀린 xlsx 를 정상 경로로
+      })
+      .catch(function (err) {
+        pwGo.disabled = false;
+        var m = (err && err.message) ? err.message : String(err);
+        if (/incorrect|password|wrong/i.test(m)) setPwMsg("비밀번호가 틀렸어요. 다시 확인해 주세요.");
+        else setPwMsg("복호화에 실패했어요. 네트워크가 막혀 있다면, 엑셀에서 비밀번호를 없앤 뒤 저장해 다시 올려주세요. (" + m + ")");
+      });
+  }
+  pwGo.addEventListener("click", tryUnlock);
+  pwInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); tryUnlock(); } });
 
   // ---- 2단계: 시트 로드 후 ----
   function onSheetLoaded(displayName) {
@@ -561,9 +647,11 @@
   // ---- 유틸 ----
   function resetAll() {
     aoa = []; headerIdx = 0;
+    pendingEncBytes = null;
     fileInput.value = "";
     step2.hidden = true; step3.hidden = true;
     showFileErr("");
+    hidePw();
     document.getElementById("step1").scrollIntoView({ behavior: prefersReduced() ? "auto" : "smooth" });
   }
   function escapeHtml(s) {
