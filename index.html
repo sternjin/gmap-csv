@@ -271,30 +271,115 @@
   });
   $("reset").addEventListener("click", resetAll);
 
-  function showFileErr(text) {
-    fileErr.textContent = text;
-    fileErr.hidden = !text;
+  // 메인 메시지 + (있으면) 개발자에게 전달할 기술 정보 한 줄
+  function showFileErr(msg, detail) {
+    if (!msg) { fileErr.hidden = true; fileErr.innerHTML = ""; return; }
+    var html = "<div>" + escapeHtml(msg) + "</div>";
+    if (detail) {
+      html += '<div style="margin-top:8px;font-size:.78rem;opacity:.85;word-break:break-all">'
+            + "🔧 기술 정보 (개발자에게 그대로 전달하세요): " + escapeHtml(detail) + "</div>";
+    }
+    fileErr.innerHTML = html;
+    fileErr.hidden = false;
+  }
+
+  function fmtSize(n) {
+    if (!n && n !== 0) return "?";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return Math.round(n / 1024) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
+  // 앞부분 바이트로 파일 실체를 추정 (확장자는 못 믿는다 — 관공서 파일이 특히 그렇다)
+  function sniffKind(bytes) {
+    if (bytes.length === 0) return "empty";
+    if (bytes[0] === 0x50 && bytes[1] === 0x4B) return "zip";                       // PK → 진짜 xlsx(zip)
+    if (bytes[0] === 0xD0 && bytes[1] === 0xCF && bytes[2] === 0x11 && bytes[3] === 0xE0) return "cfb"; // 구 xls 또는 암호화 xlsx
+    var head = "";
+    try { head = new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, 4096)); } catch (_) {}
+    var low = head.replace(/^﻿/, "").replace(/^\s+/, "").toLowerCase();
+    if (low.indexOf("mime-version") === 0 || low.indexOf("content-type: multipart") !== -1 || low.indexOf("content-location:") !== -1) return "mhtml";
+    if (low.indexOf("<?xml") === 0) return (low.indexOf("spreadsheet") !== -1 || low.indexOf("<workbook") !== -1) ? "xmlss" : "xml";
+    if (low.indexOf("<!doctype html") === 0 || low.indexOf("<html") === 0 || low.indexOf("<table") !== -1) return "html";
+    if (bytes[0] === 0x3C) return "html";
+    return "unknown";
+  }
+
+  // UTF-8로 풀되 깨짐(�)이 많으면 EUC-KR(cp949)로 재시도 — 관공서 파일이 흔히 cp949
+  function decodeText(bytes) {
+    var u8 = "";
+    try { u8 = new TextDecoder("utf-8", { fatal: false }).decode(bytes); } catch (_) {}
+    if ((u8.match(/�/g) || []).length > 3) {
+      try { var euc = new TextDecoder("euc-kr", { fatal: false }).decode(bytes); if (euc) return euc; } catch (_) {}
+    }
+    return u8;
+  }
+
+  function hasAnyContent(rows) {
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r] || [];
+      for (var c = 0; c < row.length; c++) { if (String(row[c]).trim() !== "") return true; }
+    }
+    return false;
+  }
+
+  var MSG_FAKE = "이 파일은 진짜 엑셀이 아니라 웹페이지(HTML) 형식이에요. 흔히 관공서 시스템에서 받은 파일이 이렇습니다. "
+    + "엑셀에서 이 파일을 연 뒤 [파일 → 다른 이름으로 저장 → 파일 형식을 'Excel 통합 문서(*.xlsx)'로] 다시 저장해서 올려주세요.";
+
+  function diagMessage(kind, err) {
+    var m = (err && err.message) ? err.message : String(err);
+    if (/password|encrypt|decrypt/i.test(m)) return "비밀번호가 걸려 있는 엑셀 같아요. 엑셀에서 열어 비밀번호를 없앤 뒤 저장해서 올려주세요.";
+    if (kind === "html" || kind === "mhtml" || kind === "xml" || kind === "xmlss") return MSG_FAKE;
+    if (kind === "zip") return "엑셀 파일이 손상됐거나 다운로드가 덜 됐을 수 있어요. 원본을 다시 내려받아서 올려주세요.";
+    if (kind === "cfb") return "이 엑셀을 여는 데 실패했어요. 비밀번호가 걸려 있거나 손상됐을 수 있어요. 엑셀에서 열어 xlsx로 다시 저장해 올려주세요.";
+    return "엑셀을 여는 중 문제가 생겼어요. 엑셀에서 파일을 연 뒤 xlsx로 다시 저장해서 올려주세요.";
+  }
+
+  // array로 먼저, 실패하면 텍스트류는 문자열로 재시도 (EUC-KR 포함)
+  function parseWorkbook(bytes, kind) {
+    try { return XLSX.read(bytes, { type: "array" }); }
+    catch (e) {
+      if (kind === "html" || kind === "xml" || kind === "xmlss" || kind === "unknown") {
+        return XLSX.read(decodeText(bytes), { type: "string" });
+      }
+      throw e;
+    }
   }
 
   function handleFile(file) {
     showFileErr("");
     var name = (file.name || "").toLowerCase();
     if (!/\.(xlsx|xls)$/.test(name)) {
-      showFileErr("xlsx 또는 xls 파일을 올려주세요.");
+      showFileErr("xlsx 또는 xls 파일을 올려주세요.", (file.name || "(이름없음)") + " · 확장자가 .xlsx/.xls 가 아님");
       return;
     }
     currentFileBase = (file.name || "출력").replace(/\.(xlsx|xls)$/i, "") + "_마이맵";
     var reader = new FileReader();
-    reader.onerror = function () { showFileErr("파일을 읽지 못했어요. 다시 시도해 주세요."); };
+    reader.onerror = function () { showFileErr("파일을 읽지 못했어요. 다시 시도해 주세요.", (file.name || "") + " · FileReader 오류"); };
     reader.onload = function (e) {
+      var bytes = new Uint8Array(e.target.result);
+      var kind = sniffKind(bytes);
+      var info = (file.name || "?") + " · " + fmtSize(file.size) + " · 형식감지=" + kind;
+
+      if (kind === "empty") { showFileErr("파일이 비어 있어요 (0바이트). 원본을 다시 내려받아 올려주세요.", info); return; }
+      if (kind === "mhtml") { showFileErr(MSG_FAKE, info); return; }   // MHTML은 표 파싱 불가 → 재저장 안내
+
       try {
-        var wb = XLSX.read(e.target.result, { type: "array" });
+        var wb = parseWorkbook(bytes, kind);
         var sheet = wb.Sheets[wb.SheetNames[0]];
+        if (!sheet) { showFileErr("엑셀 안에 시트(표)가 없어요. 다른 파일인지 확인해 주세요.", info); return; }
         aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
-        if (!aoa.length) { showFileErr("빈 파일이에요. 내용이 있는 엑셀을 올려주세요."); return; }
+        if (!hasAnyContent(aoa)) {
+          showFileErr(
+            (kind === "html" || kind === "xml" || kind === "xmlss") ? MSG_FAKE
+              : "파일에서 표를 찾지 못했어요. 내용이 있는 엑셀인지 확인해 주세요.",
+            info);
+          return;
+        }
         onSheetLoaded(file.name);
       } catch (err) {
-        showFileErr("엑셀을 여는 중 문제가 생겼어요. 파일이 손상되지 않았는지 확인해 주세요.");
+        var detail = info + ' · 오류="' + ((err && err.message) ? err.message : String(err)) + '"';
+        showFileErr(diagMessage(kind, err), detail);
       }
     };
     reader.readAsArrayBuffer(file);
